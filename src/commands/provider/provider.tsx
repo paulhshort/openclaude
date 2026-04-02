@@ -18,6 +18,7 @@ import {
   resolveProviderRequest,
 } from '../../services/api/providerConfig.js'
 import {
+  buildAzureOpenAIProfileEnv,
   buildCodexProfileEnv,
   buildGeminiProfileEnv,
   buildOllamaProfileEnv,
@@ -28,6 +29,7 @@ import {
   deleteProfileFile,
   loadProfileFile,
   maskSecretForDisplay,
+  readAzureConfigFromCodexToml,
   redactSecretValueForDisplay,
   sanitizeApiKey,
   sanitizeProviderConfigValue,
@@ -63,6 +65,10 @@ type Step =
   | { name: 'gemini-key' }
   | { name: 'gemini-model'; apiKey: string }
   | { name: 'codex-check' }
+  | { name: 'azure-openai-endpoint'; detectedEndpoint?: string; detectedApiKey?: string; detectedDeployment?: string; detectedModel?: string; detectedApiVersion?: string }
+  | { name: 'azure-openai-key'; endpoint: string; detectedApiKey?: string; detectedDeployment?: string; detectedModel?: string; detectedApiVersion?: string }
+  | { name: 'azure-openai-deployment'; endpoint: string; apiKey: string; detectedDeployment?: string; detectedModel?: string; detectedApiVersion?: string }
+  | { name: 'azure-openai-model'; endpoint: string; apiKey: string; deployment: string; detectedModel?: string }
 
 type CurrentProviderSummary = {
   providerLabel: string
@@ -152,6 +158,21 @@ export function buildCurrentProviderSummary(options?: {
       ),
       endpointLabel: getSafeDisplayValue(
         processEnv.GEMINI_BASE_URL ?? DEFAULT_GEMINI_BASE_URL,
+        processEnv,
+      ),
+      savedProfileLabel,
+    }
+  }
+
+  if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_AZURE_OPENAI)) {
+    return {
+      providerLabel: 'Azure OpenAI',
+      modelLabel: getSafeDisplayValue(
+        processEnv.AZURE_OPENAI_MODEL ?? processEnv.OPENAI_MODEL ?? 'gpt-5.4',
+        processEnv,
+      ),
+      endpointLabel: getSafeDisplayValue(
+        processEnv.AZURE_OPENAI_ENDPOINT ?? '(not set)',
         processEnv,
       ),
       savedProfileLabel,
@@ -251,6 +272,24 @@ function buildSavedProfileSummary(
           process.env,
           env,
         ),
+      }
+    case 'azure-openai':
+      return {
+        providerLabel: 'Azure OpenAI',
+        modelLabel: getSafeDisplayValue(
+          env.AZURE_OPENAI_MODEL ?? 'gpt-5.4',
+          process.env,
+          env,
+        ),
+        endpointLabel: getSafeDisplayValue(
+          env.AZURE_OPENAI_ENDPOINT ?? '(not set)',
+          process.env,
+          env,
+        ),
+        credentialLabel:
+          maskSecretForDisplay(env.AZURE_OPENAI_API_KEY) !== undefined
+            ? 'API key configured'
+            : 'Azure AD',
       }
     case 'openai':
     default:
@@ -428,6 +467,12 @@ function ProviderChooser({
       label: 'Gemini',
       value: 'gemini',
       description: 'Use a Google Gemini API key',
+    },
+    {
+      label: 'Azure OpenAI',
+      value: 'azure-openai',
+      description:
+        'GPT-5.4, GPT-5.3-Codex via Azure OpenAI with Responses API support',
     },
     {
       label: 'Codex',
@@ -923,6 +968,17 @@ function ProviderWizard({ onDone }: { onDone: LocalJSXCommandOnDone }): React.Re
               })
             } else if (value === 'gemini') {
               setStep({ name: 'gemini-key' })
+            } else if (value === 'azure-openai') {
+              // Auto-detect from Codex CLI config.toml
+              const codexConfig = readAzureConfigFromCodexToml()
+              setStep({
+                name: 'azure-openai-endpoint',
+                detectedEndpoint: codexConfig?.endpoint,
+                detectedApiKey: codexConfig?.apiKey,
+                detectedDeployment: codexConfig?.deployment,
+                detectedModel: codexConfig?.model,
+                detectedApiVersion: codexConfig?.apiVersion,
+              })
             } else if (value === 'clear') {
               const filePath = deleteProfileFile()
               onDone(`Removed saved provider profile at ${filePath}. Restart OpenClaude to go back to normal startup.`, {
@@ -1112,6 +1168,166 @@ function ProviderWizard({ onDone }: { onDone: LocalJSXCommandOnDone }): React.Re
             }
           }}
           onCancel={() => setStep({ name: 'gemini-key' })}
+        />
+      )
+
+    case 'azure-openai-endpoint':
+      return (
+        <TextEntryDialog
+          resetStateKey={step.name}
+          title="Azure OpenAI setup"
+          subtitle="Step 1 of 4"
+          description={
+            step.detectedEndpoint
+              ? `Detected Azure endpoint from Codex CLI config: ${step.detectedEndpoint}\nPress Enter to use it, or type a different endpoint.`
+              : process.env.AZURE_OPENAI_ENDPOINT
+                ? 'Enter your Azure OpenAI endpoint, or leave blank to reuse the current AZURE_OPENAI_ENDPOINT.'
+                : 'Enter your Azure OpenAI resource endpoint (e.g. https://myresource.openai.azure.com).'
+          }
+          initialValue={step.detectedEndpoint ?? ''}
+          placeholder="https://myresource.openai.azure.com"
+          allowEmpty={Boolean(process.env.AZURE_OPENAI_ENDPOINT || step.detectedEndpoint)}
+          validate={value => {
+            const candidate = value.trim() || process.env.AZURE_OPENAI_ENDPOINT || step.detectedEndpoint || ''
+            if (!candidate) return 'An Azure OpenAI endpoint URL is required.'
+            try {
+              new URL(candidate)
+              return null
+            } catch {
+              return 'Enter a valid URL (e.g. https://myresource.openai.azure.com).'
+            }
+          }}
+          onSubmit={value => {
+            const endpoint = value.trim() || process.env.AZURE_OPENAI_ENDPOINT || step.detectedEndpoint || ''
+            setStep({
+              name: 'azure-openai-key',
+              endpoint,
+              detectedApiKey: step.detectedApiKey,
+              detectedDeployment: step.detectedDeployment,
+              detectedModel: step.detectedModel,
+              detectedApiVersion: step.detectedApiVersion,
+            })
+          }}
+          onCancel={() => setStep({ name: 'choose' })}
+        />
+      )
+
+    case 'azure-openai-key':
+      return (
+        <TextEntryDialog
+          resetStateKey={step.name}
+          title="Azure OpenAI setup"
+          subtitle="Step 2 of 4"
+          description={
+            step.detectedApiKey
+              ? 'Detected API key from Codex CLI config. Press Enter to use it, or type a different key.\nLeave blank to use Azure AD authentication instead.'
+              : process.env.AZURE_OPENAI_API_KEY
+                ? 'Enter an API key, or leave blank to reuse AZURE_OPENAI_API_KEY.\nYou can also leave blank to use Azure AD (DefaultAzureCredential).'
+                : 'Enter your Azure OpenAI API key, or leave blank to use Azure AD authentication (DefaultAzureCredential).'
+          }
+          initialValue=""
+          placeholder="api-key or blank for Azure AD"
+          mask="*"
+          allowEmpty
+          onSubmit={value => {
+            const apiKey = value.trim() || process.env.AZURE_OPENAI_API_KEY || step.detectedApiKey || ''
+            setStep({
+              name: 'azure-openai-deployment',
+              endpoint: step.endpoint,
+              apiKey,
+              detectedDeployment: step.detectedDeployment,
+              detectedModel: step.detectedModel,
+              detectedApiVersion: step.detectedApiVersion,
+            })
+          }}
+          onCancel={() =>
+            setStep({
+              name: 'azure-openai-endpoint',
+              detectedEndpoint: step.endpoint,
+              detectedApiKey: step.detectedApiKey,
+              detectedDeployment: step.detectedDeployment,
+              detectedModel: step.detectedModel,
+              detectedApiVersion: step.detectedApiVersion,
+            })
+          }
+        />
+      )
+
+    case 'azure-openai-deployment':
+      return (
+        <TextEntryDialog
+          resetStateKey={step.name}
+          title="Azure OpenAI setup"
+          subtitle="Step 3 of 4"
+          description={
+            step.detectedDeployment
+              ? `Detected deployment from Codex CLI config: ${step.detectedDeployment}\nPress Enter to use it, or type a different deployment name.`
+              : 'Enter your Azure OpenAI deployment name (defaults to model name if blank).'
+          }
+          initialValue={step.detectedDeployment ?? ''}
+          placeholder="gpt-5.4"
+          allowEmpty
+          onSubmit={value => {
+            const deployment = value.trim() || step.detectedDeployment || ''
+            setStep({
+              name: 'azure-openai-model',
+              endpoint: step.endpoint,
+              apiKey: step.apiKey,
+              deployment,
+              detectedModel: step.detectedModel,
+            })
+          }}
+          onCancel={() =>
+            setStep({
+              name: 'azure-openai-key',
+              endpoint: step.endpoint,
+              detectedApiKey: step.apiKey,
+              detectedDeployment: step.detectedDeployment,
+              detectedModel: step.detectedModel,
+              detectedApiVersion: step.detectedApiVersion,
+            })
+          }
+        />
+      )
+
+    case 'azure-openai-model':
+      return (
+        <TextEntryDialog
+          resetStateKey={step.name}
+          title="Azure OpenAI setup"
+          subtitle="Step 4 of 4"
+          description={
+            step.detectedModel
+              ? `Detected model from Codex CLI config: ${step.detectedModel}\nPress Enter to use it, or enter a different model name.`
+              : 'Enter the model name. Leave blank for gpt-5.4.'
+          }
+          initialValue={step.detectedModel ?? ''}
+          placeholder="gpt-5.4"
+          allowEmpty
+          onSubmit={value => {
+            const model = value.trim() || step.detectedModel || 'gpt-5.4'
+            const deployment = step.deployment || model
+            const env = buildAzureOpenAIProfileEnv({
+              endpoint: step.endpoint,
+              apiKey: step.apiKey || undefined,
+              deployment,
+              model,
+              useResponsesApi: true,
+              processEnv: {},
+            })
+            if (env) {
+              finishProfileSave(onDone, 'azure-openai', env)
+            }
+          }}
+          onCancel={() =>
+            setStep({
+              name: 'azure-openai-deployment',
+              endpoint: step.endpoint,
+              apiKey: step.apiKey,
+              detectedDeployment: step.deployment,
+              detectedModel: step.detectedModel,
+            })
+          }
         />
       )
 

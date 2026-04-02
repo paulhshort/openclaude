@@ -96,6 +96,13 @@ function detectProvider(): { name: string; model: string; baseUrl: string; isLoc
     return { name: 'GitHub Models', model, baseUrl, isLocal: false }
   }
 
+  const useAzureOpenAI = process.env.CLAUDE_CODE_USE_AZURE_OPENAI === '1' || process.env.CLAUDE_CODE_USE_AZURE_OPENAI === 'true'
+  if (useAzureOpenAI) {
+    const model = process.env.AZURE_OPENAI_MODEL || process.env.OPENAI_MODEL || 'gpt-5.4'
+    const endpoint = process.env.AZURE_OPENAI_ENDPOINT || ''
+    return { name: 'Azure OpenAI', model, baseUrl: endpoint, isLocal: false }
+  }
+
   if (useOpenAI) {
     const rawModel = process.env.OPENAI_MODEL || 'gpt-4o'
     const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
 import {
   DEFAULT_CODEX_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
@@ -25,6 +26,7 @@ const PROFILE_ENV_KEYS = [
   'CLAUDE_CODE_USE_BEDROCK',
   'CLAUDE_CODE_USE_VERTEX',
   'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_AZURE_OPENAI',
   'OPENAI_BASE_URL',
   'OPENAI_MODEL',
   'OPENAI_API_KEY',
@@ -35,6 +37,12 @@ const PROFILE_ENV_KEYS = [
   'GEMINI_MODEL',
   'GEMINI_BASE_URL',
   'GOOGLE_API_KEY',
+  'AZURE_OPENAI_ENDPOINT',
+  'AZURE_OPENAI_API_KEY',
+  'AZURE_OPENAI_DEPLOYMENT',
+  'AZURE_OPENAI_MODEL',
+  'AZURE_OPENAI_API_VERSION',
+  'AZURE_OPENAI_USE_RESPONSES_API',
 ] as const
 
 const SECRET_ENV_KEYS = [
@@ -42,9 +50,10 @@ const SECRET_ENV_KEYS = [
   'CODEX_API_KEY',
   'GEMINI_API_KEY',
   'GOOGLE_API_KEY',
+  'AZURE_OPENAI_API_KEY',
 ] as const
 
-export type ProviderProfile = 'openai' | 'ollama' | 'codex' | 'gemini' | 'atomic-chat'
+export type ProviderProfile = 'openai' | 'ollama' | 'codex' | 'gemini' | 'atomic-chat' | 'azure-openai'
 
 export type ProfileEnv = {
   OPENAI_BASE_URL?: string
@@ -56,6 +65,12 @@ export type ProfileEnv = {
   GEMINI_API_KEY?: string
   GEMINI_MODEL?: string
   GEMINI_BASE_URL?: string
+  AZURE_OPENAI_ENDPOINT?: string
+  AZURE_OPENAI_API_KEY?: string
+  AZURE_OPENAI_DEPLOYMENT?: string
+  AZURE_OPENAI_MODEL?: string
+  AZURE_OPENAI_API_VERSION?: string
+  AZURE_OPENAI_USE_RESPONSES_API?: string
 }
 
 export type ProfileFile = {
@@ -90,7 +105,8 @@ export function isProviderProfile(value: unknown): value is ProviderProfile {
     value === 'ollama' ||
     value === 'codex' ||
     value === 'gemini' ||
-    value === 'atomic-chat'
+    value === 'atomic-chat' ||
+    value === 'azure-openai'
   )
 }
 
@@ -110,6 +126,11 @@ function looksLikeSecretValue(value: string): boolean {
   }
 
   if (trimmed.startsWith('AIza')) {
+    return true
+  }
+
+  // Azure OpenAI API keys are typically 32-char hex strings
+  if (/^[0-9a-f]{32}$/i.test(trimmed)) {
     return true
   }
 
@@ -340,6 +361,138 @@ export function buildCodexProfileEnv(options: {
   return env
 }
 
+export function buildAzureOpenAIProfileEnv(options: {
+  endpoint?: string | null
+  apiKey?: string | null
+  deployment?: string | null
+  model?: string | null
+  apiVersion?: string | null
+  useResponsesApi?: boolean
+  processEnv?: NodeJS.ProcessEnv
+}): ProfileEnv | null {
+  const processEnv = options.processEnv ?? process.env
+  const endpoint =
+    options.endpoint?.trim() ||
+    processEnv.AZURE_OPENAI_ENDPOINT?.trim()
+  if (!endpoint) {
+    return null
+  }
+
+  const env: ProfileEnv = {
+    AZURE_OPENAI_ENDPOINT: endpoint,
+    AZURE_OPENAI_MODEL:
+      options.model?.trim() ||
+      processEnv.AZURE_OPENAI_MODEL?.trim() ||
+      processEnv.OPENAI_MODEL?.trim() ||
+      'gpt-5.4',
+    AZURE_OPENAI_DEPLOYMENT:
+      options.deployment?.trim() ||
+      processEnv.AZURE_OPENAI_DEPLOYMENT?.trim() ||
+      options.model?.trim() ||
+      processEnv.AZURE_OPENAI_MODEL?.trim() ||
+      'gpt-5.4',
+  }
+
+  const key = sanitizeApiKey(
+    options.apiKey ?? processEnv.AZURE_OPENAI_API_KEY,
+  )
+  if (key) {
+    env.AZURE_OPENAI_API_KEY = key
+  }
+
+  const apiVersion =
+    options.apiVersion?.trim() ||
+    processEnv.AZURE_OPENAI_API_VERSION?.trim()
+  if (apiVersion) {
+    env.AZURE_OPENAI_API_VERSION = apiVersion
+  }
+
+  if (options.useResponsesApi !== undefined) {
+    env.AZURE_OPENAI_USE_RESPONSES_API = options.useResponsesApi ? '1' : '0'
+  }
+
+  return env
+}
+
+/**
+ * Attempt to read Azure OpenAI settings from a Codex CLI config.toml file.
+ * Returns null if no config is found or it doesn't contain Azure settings.
+ */
+export function readAzureConfigFromCodexToml(options?: {
+  codexHome?: string
+  processEnv?: NodeJS.ProcessEnv
+}): {
+  endpoint?: string
+  apiKey?: string
+  deployment?: string
+  model?: string
+  apiVersion?: string
+} | null {
+  const processEnv = options?.processEnv ?? process.env
+  const codexHome =
+    options?.codexHome?.trim() ||
+    processEnv.CODEX_HOME?.trim() ||
+    join(homedir(), '.codex')
+  const configPath = join(codexHome, 'config.toml')
+
+  if (!existsSync(configPath)) return null
+
+  try {
+    const raw = readFileSync(configPath, 'utf8')
+    const result: {
+      endpoint?: string
+      apiKey?: string
+      deployment?: string
+      model?: string
+      apiVersion?: string
+    } = {}
+
+    // Simple TOML key=value parser for the keys we care about.
+    // Handles bare values and quoted strings. This avoids pulling in
+    // a full TOML library for a handful of flat keys.
+    let inAzureSection = false
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim()
+      if (trimmed.startsWith('[')) {
+        const section = trimmed.replace(/^\[+|\]+$/g, '').trim().toLowerCase()
+        inAzureSection =
+          section === 'azure' ||
+          section === 'azure_openai' ||
+          section === 'azure-openai' ||
+          section === 'provider.azure' ||
+          section === 'provider.azure_openai' ||
+          section === 'provider.azure-openai'
+        continue
+      }
+
+      if (!inAzureSection) continue
+
+      const match = trimmed.match(/^(\w+)\s*=\s*["']?([^"'\r\n]*)["']?\s*$/)
+      if (!match) continue
+      const [, key, value] = match
+      if (!key || !value) continue
+      const k = key.toLowerCase()
+
+      if (k === 'endpoint' || k === 'azure_endpoint' || k === 'base_url') {
+        result.endpoint = value.trim()
+      } else if (k === 'api_key' || k === 'apikey' || k === 'key') {
+        result.apiKey = value.trim()
+      } else if (k === 'deployment' || k === 'deployment_name') {
+        result.deployment = value.trim()
+      } else if (k === 'model') {
+        result.model = value.trim()
+      } else if (k === 'api_version' || k === 'apiversion') {
+        result.apiVersion = value.trim()
+      }
+    }
+
+    if (!result.endpoint && !result.apiKey) return null
+    return result
+  } catch {
+    return null
+  }
+}
+
 export function createProfileFile(
   profile: ProviderProfile,
   env: ProfileEnv,
@@ -403,7 +556,8 @@ export function hasExplicitProviderSelection(
     processEnv.CLAUDE_CODE_USE_GEMINI !== undefined ||
     processEnv.CLAUDE_CODE_USE_BEDROCK !== undefined ||
     processEnv.CLAUDE_CODE_USE_VERTEX !== undefined ||
-    processEnv.CLAUDE_CODE_USE_FOUNDRY !== undefined
+    processEnv.CLAUDE_CODE_USE_FOUNDRY !== undefined ||
+    processEnv.CLAUDE_CODE_USE_AZURE_OPENAI !== undefined
   )
 }
 
@@ -498,6 +652,62 @@ export async function buildLaunchEnv(options: {
     delete env.CODEX_API_KEY
     delete env.CHATGPT_ACCOUNT_ID
     delete env.CODEX_ACCOUNT_ID
+
+    return env
+  }
+
+  if (options.profile === 'azure-openai') {
+    const env: NodeJS.ProcessEnv = {
+      ...processEnv,
+      CLAUDE_CODE_USE_AZURE_OPENAI: '1',
+    }
+
+    delete env.CLAUDE_CODE_USE_OPENAI
+    delete env.CLAUDE_CODE_USE_GEMINI
+    delete env.CLAUDE_CODE_USE_GITHUB
+    delete env.OPENAI_BASE_URL
+    delete env.OPENAI_MODEL
+    delete env.OPENAI_API_KEY
+    delete env.GEMINI_API_KEY
+    delete env.GEMINI_MODEL
+    delete env.GEMINI_BASE_URL
+    delete env.GOOGLE_API_KEY
+    delete env.CODEX_API_KEY
+    delete env.CHATGPT_ACCOUNT_ID
+    delete env.CODEX_ACCOUNT_ID
+
+    // Merge persisted Azure settings
+    const persistedAzureEndpoint = persistedEnv.AZURE_OPENAI_ENDPOINT
+    const persistedAzureKey = sanitizeApiKey(persistedEnv.AZURE_OPENAI_API_KEY)
+    const persistedAzureDeployment = persistedEnv.AZURE_OPENAI_DEPLOYMENT
+    const persistedAzureModel = persistedEnv.AZURE_OPENAI_MODEL
+    const persistedAzureVersion = persistedEnv.AZURE_OPENAI_API_VERSION
+    const persistedAzureResponses = persistedEnv.AZURE_OPENAI_USE_RESPONSES_API
+
+    env.AZURE_OPENAI_ENDPOINT =
+      processEnv.AZURE_OPENAI_ENDPOINT || persistedAzureEndpoint || ''
+    env.AZURE_OPENAI_MODEL =
+      processEnv.AZURE_OPENAI_MODEL || persistedAzureModel || 'gpt-5.4'
+    env.AZURE_OPENAI_DEPLOYMENT =
+      processEnv.AZURE_OPENAI_DEPLOYMENT || persistedAzureDeployment || env.AZURE_OPENAI_MODEL
+
+    const azureKey =
+      sanitizeApiKey(processEnv.AZURE_OPENAI_API_KEY) || persistedAzureKey
+    if (azureKey) {
+      env.AZURE_OPENAI_API_KEY = azureKey
+    } else {
+      delete env.AZURE_OPENAI_API_KEY
+    }
+
+    if (processEnv.AZURE_OPENAI_API_VERSION || persistedAzureVersion) {
+      env.AZURE_OPENAI_API_VERSION =
+        processEnv.AZURE_OPENAI_API_VERSION || persistedAzureVersion
+    }
+
+    if (processEnv.AZURE_OPENAI_USE_RESPONSES_API || persistedAzureResponses) {
+      env.AZURE_OPENAI_USE_RESPONSES_API =
+        processEnv.AZURE_OPENAI_USE_RESPONSES_API || persistedAzureResponses
+    }
 
     return env
   }

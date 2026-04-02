@@ -7,6 +7,7 @@ export type APIProvider =
   | 'vertex'
   | 'foundry'
   | 'openai'
+  | 'azureOpenai'
   | 'gemini'
   | 'github'
   | 'codex'
@@ -16,17 +17,19 @@ export function getAPIProvider(): APIProvider {
     ? 'gemini'
     : isEnvTruthy(process.env.CLAUDE_CODE_USE_GITHUB)
       ? 'github'
-      : isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
-        ? isCodexModel()
-          ? 'codex'
-          : 'openai'
-        : isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK)
-          ? 'bedrock'
-          : isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX)
-            ? 'vertex'
-            : isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY)
-              ? 'foundry'
-              : 'firstParty'
+      : isEnvTruthy(process.env.CLAUDE_CODE_USE_AZURE_OPENAI)
+        ? 'azureOpenai'
+        : isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI)
+          ? isCodexModel()
+            ? 'codex'
+            : 'openai'
+          : isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK)
+            ? 'bedrock'
+            : isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX)
+              ? 'vertex'
+              : isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY)
+                ? 'foundry'
+                : 'firstParty'
 }
 
 export function usesAnthropicAccountFlow(): boolean {

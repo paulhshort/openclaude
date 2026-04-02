@@ -56,6 +56,15 @@ function getProviderValidationError(
   const useOpenAI = isEnvTruthy(env.CLAUDE_CODE_USE_OPENAI)
   const useGithub = isEnvTruthy(env.CLAUDE_CODE_USE_GITHUB)
 
+  if (isEnvTruthy(env.CLAUDE_CODE_USE_AZURE_OPENAI)) {
+    if (!env.AZURE_OPENAI_ENDPOINT) {
+      return 'AZURE_OPENAI_ENDPOINT is required when CLAUDE_CODE_USE_AZURE_OPENAI=1 (e.g. https://myresource.openai.azure.com).'
+    }
+    // Either API key or Azure AD auth is needed — if neither API key nor
+    // skip-auth flag is set, we rely on DefaultAzureCredential at runtime.
+    return null
+  }
+
   if (isEnvTruthy(env.CLAUDE_CODE_USE_GEMINI)) {
     if (!(env.GEMINI_API_KEY ?? env.GOOGLE_API_KEY)) {
       return 'GEMINI_API_KEY is required when CLAUDE_CODE_USE_GEMINI=1.'

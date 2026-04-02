@@ -9,6 +9,11 @@ export const DEFAULT_CODEX_BASE_URL = 'https://chatgpt.com/backend-api/codex'
 /** Default GitHub Models API model when user selects copilot / github:copilot */
 export const DEFAULT_GITHUB_MODELS_API_MODEL = 'openai/gpt-4.1'
 
+/** Default Azure OpenAI API version — use the latest preview that supports the Responses API */
+export const DEFAULT_AZURE_OPENAI_API_VERSION = '2025-03-01-preview'
+/** Default Azure OpenAI model/deployment */
+export const DEFAULT_AZURE_OPENAI_MODEL = 'gpt-5.4'
+
 const CODEX_ALIAS_MODELS: Record<
   string,
   {
@@ -58,7 +63,7 @@ const CODEX_ALIAS_MODELS: Record<
 type CodexAlias = keyof typeof CODEX_ALIAS_MODELS
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 
-export type ProviderTransport = 'chat_completions' | 'codex_responses'
+export type ProviderTransport = 'chat_completions' | 'codex_responses' | 'azure_responses' | 'azure_chat_completions'
 
 export type ResolvedProviderRequest = {
   transport: ProviderTransport
@@ -379,4 +384,144 @@ export function getReasoningEffortForModel(model: string): ReasoningEffort | und
   const alias = base as CodexAlias
   const aliasConfig = CODEX_ALIAS_MODELS[alias]
   return aliasConfig?.reasoningEffort
+}
+
+// ---------------------------------------------------------------------------
+// Azure OpenAI provider config
+// ---------------------------------------------------------------------------
+
+export type ResolvedAzureOpenAIRequest = {
+  transport: 'azure_responses' | 'azure_chat_completions'
+  endpoint: string
+  deployment: string
+  apiVersion: string
+  model: string
+  reasoning?: {
+    effort: ReasoningEffort
+  }
+}
+
+/**
+ * Models that support the Azure OpenAI Responses API (/openai/v1/responses).
+ * Per https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/responses
+ */
+const AZURE_RESPONSES_API_MODELS = new Set([
+  // GPT-5.4 family
+  'gpt-5.4',
+  'gpt-5.4-pro',
+  'gpt-5.4-mini',
+  'gpt-5.4-nano',
+  // GPT-5.3 family
+  'gpt-5.3-codex',
+  'gpt-5.3-codex-spark',
+  'gpt-5.3-chat',
+  // GPT-5.2 family
+  'gpt-5.2-codex',
+  'gpt-5.2',
+  'gpt-5.2-chat',
+  // GPT-5.1 family
+  'gpt-5.1-codex-max',
+  'gpt-5.1-codex-mini',
+  'gpt-5.1-codex',
+  'gpt-5.1',
+  'gpt-5.1-chat',
+  // GPT-5 family
+  'gpt-5',
+  'gpt-5-pro',
+  'gpt-5-codex',
+  'gpt-5-mini',
+  'gpt-5-nano',
+  'gpt-5-chat',
+  // GPT-4.1 family
+  'gpt-4.1',
+  'gpt-4.1-mini',
+  'gpt-4.1-nano',
+  // GPT-4o family
+  'gpt-4o',
+  'gpt-4o-mini',
+  // Reasoning models
+  'o1',
+  'o3-mini',
+  'o3',
+  'o4-mini',
+])
+
+/** Azure OpenAI models with recommended reasoning effort defaults */
+const AZURE_MODEL_REASONING_DEFAULTS: Record<string, ReasoningEffort> = {
+  'gpt-5.4': 'high',
+  'gpt-5.4-pro': 'high',
+  'gpt-5.3-codex': 'high',
+  'gpt-5.2-codex': 'high',
+  'gpt-5.1-codex-max': 'high',
+  'gpt-5-pro': 'high',
+  'gpt-5-codex': 'high',
+  'gpt-5.2': 'medium',
+  'gpt-5.4-mini': 'medium',
+}
+
+export function isAzureOpenAIEndpoint(url: string | undefined): boolean {
+  if (!url) return false
+  return /openai\.azure\.com|cognitiveservices\.azure\.com|services\.ai\.azure\.com/.test(url)
+}
+
+export function resolveAzureOpenAIRequest(options?: {
+  model?: string
+  endpoint?: string
+  deployment?: string
+  apiVersion?: string
+  useResponsesApi?: boolean
+  reasoningEffortOverride?: ReasoningEffort
+}): ResolvedAzureOpenAIRequest {
+  const endpoint = (
+    options?.endpoint ??
+    process.env.AZURE_OPENAI_ENDPOINT ??
+    ''
+  ).replace(/\/+$/, '')
+
+  const model =
+    options?.model?.trim() ||
+    process.env.AZURE_OPENAI_MODEL?.trim() ||
+    process.env.OPENAI_MODEL?.trim() ||
+    DEFAULT_AZURE_OPENAI_MODEL
+
+  const deployment =
+    options?.deployment?.trim() ||
+    process.env.AZURE_OPENAI_DEPLOYMENT?.trim() ||
+    model
+
+  const apiVersion =
+    options?.apiVersion?.trim() ||
+    process.env.AZURE_OPENAI_API_VERSION?.trim() ||
+    DEFAULT_AZURE_OPENAI_API_VERSION
+
+  // Determine whether to use the Responses API
+  const envUseResponses = process.env.AZURE_OPENAI_USE_RESPONSES_API
+  const useResponses =
+    options?.useResponsesApi ??
+    (envUseResponses !== undefined
+      ? envUseResponses.trim().toLowerCase() !== '0' &&
+        envUseResponses.trim().toLowerCase() !== 'false'
+      : AZURE_RESPONSES_API_MODELS.has(model.toLowerCase()))
+
+  const transport: 'azure_responses' | 'azure_chat_completions' = useResponses
+    ? 'azure_responses'
+    : 'azure_chat_completions'
+
+  // Resolve reasoning effort
+  const descriptor = parseModelDescriptor(model)
+  const reasoning = options?.reasoningEffortOverride
+    ? { effort: options.reasoningEffortOverride }
+    : descriptor.reasoning ??
+      (AZURE_MODEL_REASONING_DEFAULTS[model.toLowerCase()]
+        ? { effort: AZURE_MODEL_REASONING_DEFAULTS[model.toLowerCase()] }
+        : undefined)
+
+  return {
+    transport,
+    endpoint,
+    deployment,
+    apiVersion,
+    model: descriptor.baseModel,
+    reasoning,
+  }
 }
