@@ -402,31 +402,61 @@ export type ResolvedAzureOpenAIRequest = {
 }
 
 /**
- * Models that support the Azure OpenAI Responses API.
- * These models can use the /responses endpoint instead of /chat/completions.
+ * Models that support the Azure OpenAI Responses API (/openai/v1/responses).
+ * Per https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/responses
  */
 const AZURE_RESPONSES_API_MODELS = new Set([
+  // GPT-5.4 family
   'gpt-5.4',
+  'gpt-5.4-pro',
+  'gpt-5.4-mini',
+  'gpt-5.4-nano',
+  // GPT-5.3 family
   'gpt-5.3-codex',
   'gpt-5.3-codex-spark',
+  'gpt-5.3-chat',
+  // GPT-5.2 family
   'gpt-5.2-codex',
   'gpt-5.2',
+  'gpt-5.2-chat',
+  // GPT-5.1 family
   'gpt-5.1-codex-max',
   'gpt-5.1-codex-mini',
+  'gpt-5.1-codex',
+  'gpt-5.1',
+  'gpt-5.1-chat',
+  // GPT-5 family
+  'gpt-5',
+  'gpt-5-pro',
+  'gpt-5-codex',
+  'gpt-5-mini',
+  'gpt-5-nano',
+  'gpt-5-chat',
+  // GPT-4.1 family
   'gpt-4.1',
   'gpt-4.1-mini',
   'gpt-4.1-nano',
+  // GPT-4o family
   'gpt-4o',
   'gpt-4o-mini',
+  // Reasoning models
+  'o1',
+  'o3-mini',
+  'o3',
+  'o4-mini',
 ])
 
 /** Azure OpenAI models with recommended reasoning effort defaults */
 const AZURE_MODEL_REASONING_DEFAULTS: Record<string, ReasoningEffort> = {
   'gpt-5.4': 'high',
+  'gpt-5.4-pro': 'high',
   'gpt-5.3-codex': 'high',
   'gpt-5.2-codex': 'high',
   'gpt-5.1-codex-max': 'high',
+  'gpt-5-pro': 'high',
+  'gpt-5-codex': 'high',
   'gpt-5.2': 'medium',
+  'gpt-5.4-mini': 'medium',
 }
 
 export function isAzureOpenAIEndpoint(url: string | undefined): boolean {

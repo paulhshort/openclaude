@@ -1076,7 +1076,10 @@ const importRuntimeModule = new Function(
 ) as (specifier: string) => Promise<any>
 
 /**
- * Acquire an Azure AD bearer token for Azure Cognitive Services.
+ * Acquire a Microsoft Entra ID (Azure AD) bearer token for Azure OpenAI.
+ * Uses the scope documented at:
+ * https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/responses
+ *
  * Returns undefined when API key auth is used instead.
  */
 async function acquireAzureADToken(): Promise<string | undefined> {
@@ -1087,9 +1090,13 @@ async function acquireAzureADToken(): Promise<string | undefined> {
     DefaultAzureCredential: AzureCredential,
     getBearerTokenProvider,
   } = await importRuntimeModule('@azure/identity')
+  // The Responses API docs use https://ai.azure.com/.default; fall back to
+  // the older cognitiveservices scope if the user explicitly overrides.
+  const scope =
+    process.env.AZURE_OPENAI_TOKEN_SCOPE ?? 'https://ai.azure.com/.default'
   const tokenProvider = getBearerTokenProvider(
     new AzureCredential(),
-    'https://cognitiveservices.azure.com/.default',
+    scope,
   )
   return tokenProvider()
 }
@@ -1107,15 +1114,18 @@ function buildAzureAuthHeaders(azureAdToken?: string): Record<string, string> {
 
 /**
  * Build the Azure OpenAI Responses API URL.
- * Format: {endpoint}/openai/deployments/{deployment}/responses?api-version={version}
+ * The Responses API uses the v1 path: {endpoint}/openai/v1/responses
+ * The model/deployment is specified in the request body, NOT the URL.
+ * See: https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/responses
  */
 function buildAzureResponsesUrl(request: ResolvedAzureOpenAIRequest): string {
-  return `${request.endpoint}/openai/deployments/${request.deployment}/responses?api-version=${request.apiVersion}`
+  return `${request.endpoint}/openai/v1/responses`
 }
 
 /**
  * Build the Azure OpenAI Chat Completions API URL.
- * Format: {endpoint}/openai/deployments/{deployment}/chat/completions?api-version={version}
+ * The Chat Completions API uses the deployment-scoped path:
+ * {endpoint}/openai/deployments/{deployment}/chat/completions?api-version={version}
  */
 function buildAzureChatCompletionsUrl(request: ResolvedAzureOpenAIRequest): string {
   return `${request.endpoint}/openai/deployments/${request.deployment}/chat/completions?api-version=${request.apiVersion}`
