@@ -21,6 +21,8 @@ function getProviderLabel(): string {
       return 'Azure Foundry'
     case 'openai':
       return 'OpenAI-compatible API'
+    case 'azureOpenai':
+      return 'Azure OpenAI'
     case 'gemini':
       return 'Gemini API'
     default:

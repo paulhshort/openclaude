@@ -327,6 +327,66 @@ function getCodexModelOptions(): ModelOption[] {
   ]
 }
 
+function getAzureOpenAIModelOptions(): ModelOption[] {
+  return [
+    {
+      value: 'gpt-5.4',
+      label: 'GPT-5.4',
+      description: 'Most capable · High reasoning',
+    },
+    {
+      value: 'gpt-5.4-mini',
+      label: 'GPT-5.4 Mini',
+      description: 'Fast and cost-effective · Medium reasoning',
+    },
+    {
+      value: 'gpt-5.3-codex',
+      label: 'GPT-5.3 Codex',
+      description: 'Optimized for code · High reasoning',
+    },
+    {
+      value: 'gpt-5.3-codex-spark',
+      label: 'GPT-5.3 Codex Spark',
+      description: 'Fast tool loops · No reasoning overhead',
+    },
+    {
+      value: 'gpt-5.2-codex',
+      label: 'GPT-5.2 Codex',
+      description: 'Code generation · High reasoning',
+    },
+    {
+      value: 'gpt-4.1',
+      label: 'GPT-4.1',
+      description: 'Strong general purpose model',
+    },
+    {
+      value: 'gpt-4.1-mini',
+      label: 'GPT-4.1 Mini',
+      description: 'Fast and affordable',
+    },
+    {
+      value: 'gpt-4o',
+      label: 'GPT-4o',
+      description: 'Multimodal · Good all-rounder',
+    },
+    {
+      value: 'gpt-4o-mini',
+      label: 'GPT-4o Mini',
+      description: 'Fastest · Lowest cost',
+    },
+    {
+      value: 'o3',
+      label: 'o3',
+      description: 'Advanced reasoning model',
+    },
+    {
+      value: 'o4-mini',
+      label: 'o4-mini',
+      description: 'Fast reasoning model',
+    },
+  ]
+}
+
 // @[MODEL LAUNCH]: Update the model picker lists below to include/reorder options for the new model.
 // Each user tier (ant, Max/Team Premium, Pro/Team Standard/Enterprise, PAYG 1P, PAYG 3P) has its own list.
 function getModelOptionsBase(fastMode = false): ModelOption[] {
@@ -406,8 +466,14 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
   const payg3pOptions = [getDefaultOptionForUser(fastMode)]
 
   // Add Codex models for openai and codex providers
-  if (getAPIProvider() === 'openai' || getAPIProvider() === 'codex' || getAPIProvider() === 'azureOpenai') {
+  if (getAPIProvider() === 'openai' || getAPIProvider() === 'codex') {
     payg3pOptions.push(...getCodexModelOptions())
+  }
+
+  // Azure OpenAI: show only Azure-relevant models, skip Claude models
+  if (getAPIProvider() === 'azureOpenai') {
+    payg3pOptions.push(...getAzureOpenAIModelOptions())
+    return payg3pOptions
   }
 
   const customSonnet = getCustomSonnetOption()
