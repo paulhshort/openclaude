@@ -43,6 +43,10 @@ export function getSmallFastModel(): ModelName {
   if (getAPIProvider() === 'openai') {
     return process.env.OPENAI_MODEL || 'gpt-4o-mini'
   }
+  // For Azure OpenAI provider, use a fast model
+  if (getAPIProvider() === 'azureOpenai') {
+    return process.env.AZURE_OPENAI_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini'
+  }
   return getDefaultHaikuModel()
 }
 
@@ -75,7 +79,7 @@ export function getUserSpecifiedModelSetting(): ModelSetting | undefined {
     specifiedModel = modelOverride
   } else {
     const settings = getSettings_DEPRECATED() || {}
-    specifiedModel = process.env.ANTHROPIC_MODEL || process.env.GEMINI_MODEL || process.env.OPENAI_MODEL || settings.model || undefined
+    specifiedModel = process.env.ANTHROPIC_MODEL || process.env.GEMINI_MODEL || process.env.AZURE_OPENAI_MODEL || process.env.OPENAI_MODEL || settings.model || undefined
   }
 
   // Ignore the user-specified model if it's not in the availableModels allowlist.
@@ -123,6 +127,10 @@ export function getDefaultOpusModel(): ModelName {
   if (getAPIProvider() === 'openai') {
     return process.env.OPENAI_MODEL || 'gpt-4o'
   }
+  // Azure OpenAI provider: use user-specified model or default to gpt-5.4
+  if (getAPIProvider() === 'azureOpenai') {
+    return process.env.AZURE_OPENAI_MODEL || process.env.OPENAI_MODEL || 'gpt-5.4'
+  }
   // Codex provider: use user-specified model or default to gpt-5.4
   if (getAPIProvider() === 'codex') {
     return process.env.OPENAI_MODEL || 'gpt-5.4'
@@ -149,6 +157,10 @@ export function getDefaultSonnetModel(): ModelName {
   if (getAPIProvider() === 'openai') {
     return process.env.OPENAI_MODEL || 'gpt-4o'
   }
+  // Azure OpenAI provider
+  if (getAPIProvider() === 'azureOpenai') {
+    return process.env.AZURE_OPENAI_MODEL || process.env.OPENAI_MODEL || 'gpt-5.3-codex'
+  }
   // Codex provider
   if (getAPIProvider() === 'codex') {
     return process.env.OPENAI_MODEL || 'gpt-5.4'
@@ -172,6 +184,10 @@ export function getDefaultHaikuModel(): ModelName {
   // OpenAI provider
   if (getAPIProvider() === 'openai') {
     return process.env.OPENAI_MODEL || 'gpt-4o-mini'
+  }
+  // Azure OpenAI provider
+  if (getAPIProvider() === 'azureOpenai') {
+    return process.env.AZURE_OPENAI_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini'
   }
   // Codex provider
   if (getAPIProvider() === 'codex') {
@@ -228,6 +244,10 @@ export function getDefaultMainLoopModelSetting(): ModelName | ModelAlias {
   // OpenAI provider: always use the configured OpenAI model
   if (getAPIProvider() === 'openai') {
     return process.env.OPENAI_MODEL || 'gpt-4o'
+  }
+  // Azure OpenAI provider: always use the configured Azure model
+  if (getAPIProvider() === 'azureOpenai') {
+    return process.env.AZURE_OPENAI_MODEL || process.env.OPENAI_MODEL || 'gpt-5.4'
   }
   // Codex provider: always use the configured Codex model (default gpt-5.4)
   if (getAPIProvider() === 'codex') {
@@ -413,7 +433,7 @@ export function renderModelSetting(setting: ModelName | ModelAlias): string {
  */
 export function getPublicModelDisplayName(model: ModelName): string | null {
   // For OpenAI/Gemini/Codex providers, show the actual model name not a Claude alias
-  if (getAPIProvider() === 'openai' || getAPIProvider() === 'gemini' || getAPIProvider() === 'codex') {
+  if (getAPIProvider() === 'openai' || getAPIProvider() === 'gemini' || getAPIProvider() === 'codex' || getAPIProvider() === 'azureOpenai') {
     return null
   }
   switch (model) {

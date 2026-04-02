@@ -35,8 +35,10 @@ import {
 } from './codexShim.js'
 import {
   isLocalProviderUrl,
+  resolveAzureOpenAIRequest,
   resolveCodexApiCredentials,
   resolveProviderRequest,
+  type ResolvedAzureOpenAIRequest,
 } from './providerConfig.js'
 import { redactSecretValueForDisplay } from '../../utils/providerProfile.js'
 
@@ -1054,6 +1056,420 @@ export function createOpenAIShimClient(options: {
   }
 
   const beta = new OpenAIShimBeta({
+    ...(options.defaultHeaders ?? {}),
+  }, options.reasoningEffort)
+
+  return {
+    beta,
+    messages: beta.messages,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Azure OpenAI first-class provider — supports both Chat Completions and
+// the Azure Responses API with Azure AD / API key auth
+// ---------------------------------------------------------------------------
+
+const importRuntimeModule = new Function(
+  'specifier',
+  'return import(specifier)',
+) as (specifier: string) => Promise<any>
+
+/**
+ * Acquire an Azure AD bearer token for Azure Cognitive Services.
+ * Returns undefined when API key auth is used instead.
+ */
+async function acquireAzureADToken(): Promise<string | undefined> {
+  if (process.env.AZURE_OPENAI_API_KEY) return undefined
+  if (isEnvTruthy(process.env.CLAUDE_CODE_SKIP_AZURE_OPENAI_AUTH)) return undefined
+
+  const {
+    DefaultAzureCredential: AzureCredential,
+    getBearerTokenProvider,
+  } = await importRuntimeModule('@azure/identity')
+  const tokenProvider = getBearerTokenProvider(
+    new AzureCredential(),
+    'https://cognitiveservices.azure.com/.default',
+  )
+  return tokenProvider()
+}
+
+function buildAzureAuthHeaders(azureAdToken?: string): Record<string, string> {
+  const apiKey = process.env.AZURE_OPENAI_API_KEY ?? ''
+  if (apiKey) {
+    return { 'api-key': apiKey }
+  }
+  if (azureAdToken) {
+    return { Authorization: `Bearer ${azureAdToken}` }
+  }
+  return {}
+}
+
+/**
+ * Build the Azure OpenAI Responses API URL.
+ * Format: {endpoint}/openai/deployments/{deployment}/responses?api-version={version}
+ */
+function buildAzureResponsesUrl(request: ResolvedAzureOpenAIRequest): string {
+  return `${request.endpoint}/openai/deployments/${request.deployment}/responses?api-version=${request.apiVersion}`
+}
+
+/**
+ * Build the Azure OpenAI Chat Completions API URL.
+ * Format: {endpoint}/openai/deployments/{deployment}/chat/completions?api-version={version}
+ */
+function buildAzureChatCompletionsUrl(request: ResolvedAzureOpenAIRequest): string {
+  return `${request.endpoint}/openai/deployments/${request.deployment}/chat/completions?api-version=${request.apiVersion}`
+}
+
+class AzureOpenAIShimMessages {
+  private defaultHeaders: Record<string, string>
+  private reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh'
+
+  constructor(defaultHeaders: Record<string, string>, reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh') {
+    this.defaultHeaders = defaultHeaders
+    this.reasoningEffort = reasoningEffort
+  }
+
+  create(
+    params: ShimCreateParams,
+    options?: { signal?: AbortSignal; headers?: Record<string, string> },
+  ) {
+    const self = this
+
+    let httpResponse: Response | undefined
+
+    const promise = (async () => {
+      const request = resolveAzureOpenAIRequest({
+        model: params.model,
+        reasoningEffortOverride: self.reasoningEffort,
+      })
+
+      if (request.transport === 'azure_responses') {
+        const response = await self._doResponsesRequest(request, params, options)
+        httpResponse = response
+
+        if (params.stream) {
+          return new OpenAIShimStream(
+            codexStreamToAnthropic(response, request.model),
+          )
+        }
+
+        const data = await collectCodexCompletedResponse(response)
+        return convertCodexResponseToAnthropicMessage(data, request.model)
+      }
+
+      // azure_chat_completions transport
+      const response = await self._doChatCompletionsRequest(request, params, options)
+      httpResponse = response
+
+      if (params.stream) {
+        return new OpenAIShimStream(
+          openaiStreamToAnthropic(response, request.model),
+        )
+      }
+
+      const data = await response.json()
+      return self._convertNonStreamingResponse(data, request.model)
+    })()
+
+    ;(promise as unknown as Record<string, unknown>).withResponse =
+      async () => {
+        const data = await promise
+        return {
+          data,
+          response: httpResponse ?? new Response(),
+          request_id:
+            httpResponse?.headers.get('x-request-id') ?? makeMessageId(),
+        }
+      }
+
+    return promise
+  }
+
+  private async _doResponsesRequest(
+    request: ResolvedAzureOpenAIRequest,
+    params: ShimCreateParams,
+    options?: { signal?: AbortSignal; headers?: Record<string, string> },
+  ): Promise<Response> {
+    const {
+      convertAnthropicMessagesToResponsesInput,
+      convertToolsToResponsesTools,
+    } = await import('./codexShim.js')
+
+    const input = convertAnthropicMessagesToResponsesInput(
+      params.messages as Array<{
+        role?: string
+        message?: { role?: string; content?: unknown }
+        content?: unknown
+      }>,
+    )
+
+    const body: Record<string, unknown> = {
+      model: request.deployment,
+      input: input.length > 0
+        ? input
+        : [
+            {
+              type: 'message',
+              role: 'user',
+              content: [{ type: 'input_text', text: '' }],
+            },
+          ],
+      store: false,
+      stream: params.stream ?? true,
+    }
+
+    const instructions = convertSystemPrompt(params.system)
+    if (instructions) {
+      body.instructions = instructions
+    }
+
+    if (params.tools && params.tools.length > 0) {
+      const convertedTools = convertToolsToResponsesTools(
+        params.tools as Array<{
+          name?: string
+          description?: string
+          input_schema?: Record<string, unknown>
+        }>,
+      )
+      if (convertedTools.length > 0) {
+        body.tools = convertedTools
+        body.parallel_tool_calls = true
+      }
+    }
+
+    if (params.tool_choice) {
+      const tc = params.tool_choice as { type?: string; name?: string }
+      if (tc.type === 'auto') body.tool_choice = 'auto'
+      else if (tc.type === 'any') body.tool_choice = 'required'
+      else if (tc.type === 'none') body.tool_choice = 'none'
+      else if (tc.type === 'tool' && tc.name) {
+        body.tool_choice = { type: 'function', name: tc.name }
+      }
+    } else if (body.tools) {
+      body.tool_choice = 'auto'
+    }
+
+    if (request.reasoning) {
+      body.reasoning = request.reasoning
+    }
+
+    if (params.max_tokens) {
+      body.max_output_tokens = params.max_tokens
+    }
+
+    const azureAdToken = await acquireAzureADToken()
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...this.defaultHeaders,
+      ...(options?.headers ?? {}),
+      ...buildAzureAuthHeaders(azureAdToken),
+    }
+
+    const url = buildAzureResponsesUrl(request)
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: options?.signal,
+    })
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => 'unknown error')
+      let errorResponse: object | undefined
+      try { errorResponse = JSON.parse(errorBody) } catch { /* raw text */ }
+      throw APIError.generate(
+        response.status,
+        errorResponse,
+        `Azure OpenAI Responses API error ${response.status}: ${errorBody}`,
+        response.headers as unknown as Record<string, string>,
+      )
+    }
+
+    return response
+  }
+
+  private async _doChatCompletionsRequest(
+    request: ResolvedAzureOpenAIRequest,
+    params: ShimCreateParams,
+    options?: { signal?: AbortSignal; headers?: Record<string, string> },
+  ): Promise<Response> {
+    const messages = convertMessages(
+      params.messages as Array<{
+        role: string
+        message?: { role?: string; content?: unknown }
+        content?: unknown
+      }>,
+      params.system,
+    )
+
+    const body: Record<string, unknown> = {
+      model: request.deployment,
+      messages,
+      stream: params.stream ?? true,
+    }
+
+    if (params.max_tokens) {
+      body.max_completion_tokens = params.max_tokens
+    }
+    if (params.temperature !== undefined) body.temperature = params.temperature
+    if (params.top_p !== undefined) body.top_p = params.top_p
+
+    if (params.tools && params.tools.length > 0) {
+      const converted = convertTools(
+        params.tools as Array<{
+          name: string
+          description?: string
+          input_schema?: Record<string, unknown>
+        }>,
+      )
+      if (converted.length > 0) {
+        body.tools = converted
+        if (params.tool_choice) {
+          const tc = params.tool_choice as { type?: string; name?: string }
+          if (tc.type === 'auto') body.tool_choice = 'auto'
+          else if (tc.type === 'tool' && tc.name) {
+            body.tool_choice = { type: 'function', function: { name: tc.name } }
+          }
+          else if (tc.type === 'any') body.tool_choice = 'required'
+          else if (tc.type === 'none') body.tool_choice = 'none'
+        }
+      }
+    }
+
+    if (request.reasoning) {
+      body.reasoning_effort = request.reasoning.effort
+    }
+
+    const azureAdToken = await acquireAzureADToken()
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...this.defaultHeaders,
+      ...(options?.headers ?? {}),
+      ...buildAzureAuthHeaders(azureAdToken),
+    }
+
+    const url = buildAzureChatCompletionsUrl(request)
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: options?.signal,
+    })
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => 'unknown error')
+      let errorResponse: object | undefined
+      try { errorResponse = JSON.parse(errorBody) } catch { /* raw text */ }
+      throw APIError.generate(
+        response.status,
+        errorResponse,
+        `Azure OpenAI Chat Completions API error ${response.status}: ${errorBody}`,
+        response.headers as unknown as Record<string, string>,
+      )
+    }
+
+    return response
+  }
+
+  private _convertNonStreamingResponse(
+    data: {
+      id?: string
+      model?: string
+      choices?: Array<{
+        message?: {
+          role?: string
+          content?: string | null | Array<{ type?: string; text?: string }>
+          tool_calls?: Array<{
+            id: string
+            function: { name: string; arguments: string }
+            extra_content?: Record<string, unknown>
+          }>
+        }
+        finish_reason?: string
+      }>
+      usage?: {
+        prompt_tokens?: number
+        completion_tokens?: number
+      }
+    },
+    model: string,
+  ) {
+    const choice = data.choices?.[0]
+    const msg = choice?.message
+    const content: Array<Record<string, unknown>> = []
+
+    if (msg?.content) {
+      if (typeof msg.content === 'string') {
+        content.push({ type: 'text', text: msg.content })
+      } else if (Array.isArray(msg.content)) {
+        for (const part of msg.content) {
+          if (part.type === 'text' && part.text) {
+            content.push({ type: 'text', text: part.text })
+          }
+        }
+      }
+    }
+
+    if (msg?.tool_calls) {
+      for (const tc of msg.tool_calls) {
+        content.push({
+          type: 'tool_use',
+          id: tc.id,
+          name: tc.function.name,
+          input: (() => {
+            try { return JSON.parse(tc.function.arguments) } catch { return {} }
+          })(),
+        })
+      }
+    }
+
+    if (content.length === 0) {
+      content.push({ type: 'text', text: '' })
+    }
+
+    const stopReason =
+      choice?.finish_reason === 'tool_calls'
+        ? 'tool_use'
+        : choice?.finish_reason === 'length'
+          ? 'max_tokens'
+          : 'end_turn'
+
+    return {
+      id: data.id ?? makeMessageId(),
+      type: 'message',
+      role: 'assistant',
+      content,
+      model: data.model ?? model,
+      stop_reason: stopReason,
+      stop_sequence: null,
+      usage: {
+        input_tokens: data.usage?.prompt_tokens ?? 0,
+        output_tokens: data.usage?.completion_tokens ?? 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    }
+  }
+}
+
+class AzureOpenAIShimBeta {
+  messages: AzureOpenAIShimMessages
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh'
+
+  constructor(defaultHeaders: Record<string, string>, reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh') {
+    this.messages = new AzureOpenAIShimMessages(defaultHeaders, reasoningEffort)
+    this.reasoningEffort = reasoningEffort
+  }
+}
+
+export function createAzureOpenAIShimClient(options: {
+  defaultHeaders?: Record<string, string>
+  maxRetries?: number
+  timeout?: number
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh'
+}): unknown {
+  const beta = new AzureOpenAIShimBeta({
     ...(options.defaultHeaders ?? {}),
   }, options.reasoningEffort)
 

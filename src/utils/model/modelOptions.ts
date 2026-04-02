@@ -406,7 +406,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
   const payg3pOptions = [getDefaultOptionForUser(fastMode)]
 
   // Add Codex models for openai and codex providers
-  if (getAPIProvider() === 'openai' || getAPIProvider() === 'codex') {
+  if (getAPIProvider() === 'openai' || getAPIProvider() === 'codex' || getAPIProvider() === 'azureOpenai') {
     payg3pOptions.push(...getCodexModelOptions())
   }
 
